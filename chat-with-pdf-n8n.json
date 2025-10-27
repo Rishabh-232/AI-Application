@@ -1,0 +1,284 @@
+{
+  "name": "Chat with PDF \u2014 upload & ask",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "upload",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "name": "Webhook Upload",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "name": "Move Binary Data",
+      "type": "n8n-nodes-base.moveBinaryData",
+      "typeVersion": 1,
+      "position": [
+        450,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const pdfParse = require('pdf-parse');\nconst binaryData = items[0].binary.data.data;\nconst buffer = Buffer.from(binaryData, 'base64');\nreturn await pdfParse(buffer).then(parsed => [{ json: { text: parsed.text.replace(/\\s{2,}/g,' ').trim() } }]);"
+      },
+      "name": "Extract PDF Text",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        650,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const text = items[0].json.text || '';\nconst CHARS = 2000;\nlet chunks = [];\nfor (let i=0;i<text.length;i+=CHARS){chunks.push(text.slice(i,i+CHARS));}\nreturn chunks.map(c=>({json:{chunk:c}}));"
+      },
+      "name": "Chunk Text",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        850,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/embeddings",
+        "options": {},
+        "jsonParameters": true,
+        "bodyParametersJson": "={ \"model\": \"text-embedding-3-small\", \"input\": $json.chunk }",
+        "headerParametersJson": "={ \"Authorization\": \"Bearer {{$env.API_KEY}}\", \"Content-Type\": \"application/json\" }",
+        "responseFormat": "json"
+      },
+      "name": "Create Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const globalStore = this.getWorkflowStaticData('global');\nif(!globalStore.pdfIndex) globalStore.pdfIndex = [];\nconst chunk = $json.chunk;\nconst emb = $json.data[0].embedding;\nglobalStore.pdfIndex.push({ chunk, embedding: emb });\nreturn items;"
+      },
+      "name": "Store Embedding",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ask",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "name": "Webhook Ask",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/embeddings",
+        "options": {},
+        "jsonParameters": true,
+        "bodyParametersJson": "={ \"model\": \"text-embedding-3-small\", \"input\": $json.question }",
+        "headerParametersJson": "={ \"Authorization\": \"Bearer {{$env.API_KEY}}\", \"Content-Type\": \"application/json\" }",
+        "responseFormat": "json"
+      },
+      "name": "Question Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        450,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "function dot(a,b){let s=0; for(let i=0;i<a.length;i++) s+=a[i]*b[i]; return s;}\nfunction norm(a){return Math.sqrt(dot(a,a));}\nfunction cos(a,b){return dot(a,b)/(norm(a)*norm(b)+1e-10);} \nconst globalStore = this.getWorkflowStaticData('global');\nconst qemb = items[0].json.data[0].embedding;\nconst scored = (globalStore.pdfIndex||[]).map(x=>({chunk:x.chunk, score: cos(qemb, x.embedding)}));\nscored.sort((a,b)=>b.score-a.score);\nconst top = scored.slice(0,3).map(s=>s.chunk).join('\\n---\\n');\nreturn [{ json: { context: top, question: items[0].json.question } }];"
+      },
+      "name": "Similarity Search",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        650,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.groq.com/v1/chat/completions",
+        "options": {},
+        "jsonParameters": true,
+        "bodyParametersJson": "={ \"model\": \"llama3-70b-8192\", \"messages\": [ {\"role\":\"system\",\"content\":\"You are a helpful assistant. Answer using ONLY the provided context. If not found, say you don't know.\"}, {\"role\":\"user\",\"content\":\"Context:\\n\" + $json.context + \"\\n\\nQuestion:\\n\" + $json.question } ], \"max_tokens\": 512 }",
+        "headerParametersJson": "={ \"Authorization\": \"Bearer {{$env.API_KEY}}\", \"Content-Type\": \"application/json\" }",
+        "responseFormat": "json"
+      },
+      "name": "Groq Chat",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        850,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "return [{ json: { answer: $json.choices && $json.choices[0] && $json.choices[0].message ? $json.choices[0].message.content : ($json.choices && $json.choices[0] && $json.choices[0].text ? $json.choices[0].text : JSON.stringify($json)) } }];"
+      },
+      "name": "Prepare Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "responseCode": 200,
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        600
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook Upload": {
+      "main": [
+        [
+          {
+            "node": "Move Binary Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move Binary Data": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF Text": {
+      "main": [
+        [
+          {
+            "node": "Chunk Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chunk Text": {
+      "main": [
+        [
+          {
+            "node": "Create Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Embedding": {
+      "main": [
+        [
+          {
+            "node": "Store Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Ask": {
+      "main": [
+        [
+          {
+            "node": "Question Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Question Embedding": {
+      "main": [
+        [
+          {
+            "node": "Similarity Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Similarity Search": {
+      "main": [
+        [
+          {
+            "node": "Groq Chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat": {
+      "main": [
+        [
+          {
+            "node": "Prepare Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Response": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {}
+}
